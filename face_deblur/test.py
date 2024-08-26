@@ -5,7 +5,7 @@ import glob
 import tensorflow as tf
 import numpy as np
 from utils import utils as ut
-from utils import pix as net
+from utils import pix as net, pix_blind as net_blind
 from imageio import imsave, imread
 
 import os.path
@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--path', default='wts/blind', help='path to trained model')
 parser.add_argument('--data', default='data/Test_data_Helen', help='path to data')
 parser.add_argument('--outpath', default=None, help='where to save predictions')
+parser.add_argument('--with_kernels', default=False, action='store_true', help='whether to save kernels or not')
 opts = parser.parse_args()
 
 if opts.path.endswith('.npz'):
@@ -37,7 +38,7 @@ VLIST = opts.data
 nms = glob.glob('%s/*_gt/*.png'%opts.data)
 nms = [l.replace('.png', '') for l in nms]
 BSZ = 80
-    
+
 #### Build Graph
 names, blurs = [], []
 for i in range(BSZ):
@@ -50,8 +51,14 @@ for i in range(BSZ):
 blurs = tf.stack(blurs, axis=0)
 
 is_training = tf.placeholder_with_default(False, shape=[])
-model = net.Net(is_training)
-deblur = blurs + model.generate(blurs)
+if opts.with_kernels:
+    model = net_blind.Net(is_training)
+    deblurs, out_kernels = model.generate(blurs)
+else:
+    model = net.Net(is_training)
+    deblurs = model.generate(blurs)
+    out_kernels = None
+deblur = blurs + deblurs
 
 # Create session
 sess = tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=4))
@@ -60,6 +67,7 @@ sess.run(tf.global_variables_initializer())
 # Load model
 print("Restoring model from " + mfile )
 ut.loadNet(mfile,model.weights,sess)
+
 print("Done!")
 
 loss, avgpsnr = 0., 0.
@@ -73,7 +81,11 @@ for c, nm in enumerate(nms):
             fd[names[k]] = '%s_ker%02d_blur_k%d.png' % (nm, i, j)
             k = k + 1
 
-    noisy, preds = sess.run([blurs, deblur], feed_dict=fd)
+    if out_kernels is not None:
+        noisy, preds, kernel_preds = sess.run([blurs, deblur, out_kernels], feed_dict=fd)
+    else:
+        noisy, preds = sess.run([blurs, deblur], feed_dict=fd)
+        kernel_preds = None
 
     mse = np.mean((gt[np.newaxis]-preds)**2, axis=(1,2,3))
     psnr = np.mean(-10.*np.log10(mse))
@@ -89,20 +101,16 @@ for c, nm in enumerate(nms):
             for j in range(13, 29, 2):
                 outnm = '%s_ker%02d_blur_k%d.png' % (os.path.basename(nm), i, j)
                 csave('%s/%s'%(outpath,outnm), preds[k])
+
+                if kernel_preds is not None:
+                    outnm = '%s_ker%02d_blur_k%d_kernel.png' % (os.path.basename(nm), i, j)
+                    kernel_pred = kernel_preds[k]
+                    kernel_pred = kernel_pred / kernel_pred.max()
+                    csave('%s/%s'%(outpath,outnm), kernel_pred)
+
                 k = k + 1
 
 mse = loss / len(nms)
 psnr = avgpsnr / len(nms)
 print("MSE: %.4f"%mse)
 print("PSNR: %.2f"%psnr)
-
-
-
-
-
-
-
-
-
-
-
